@@ -1,25 +1,21 @@
 import os
 import threading
-from discord.ext import commands
+import asyncio
 import discord
+from discord.ext import commands
 from flask import Flask
 
 # --- RENDER УНТАХААС ХАМГААЛАХ ВЭБ СЕРВЕР ---
 app = Flask("")
 
-
 @app.route("/")
 def home():
-  return "Bot is alive!"
-
+    return "Bot is alive!"
 
 def run_web():
-  app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=8080)
 
-
-# Вэб серверийг тусдаа урсгалаар (thread) асаана
 threading.Thread(target=run_web).start()
-
 
 # --- DISCORD BOT ТОХИРГОО ---
 intents = discord.Intents.default()
@@ -28,55 +24,124 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Панель байрлах сувгийн ID (Өөрийн сувгийн ID-гаар солино уу)
-PANEL_CHANNEL_ID = 123456789012345678
+PANEL_CHANNEL_ID = 1566402878560665600  # Панель байрлах сувгийн ID
+LOG_CHANNEL_ID = 1566358811223138375    # ЭНД ӨӨРИЙН ЛОГ СУВГИЙН (LOG CHANNEL) ID-Г ОРУУЛНА УУ!
 
 
+# --- МЕССЕЖҮҮДИЙГ ХАДГАЛЖ ЛОГ РУУ ИЛГЭЭХ ФУНКЦ ---
+async def close_and_log_ticket(channel, closed_by):
+    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+    
+    # Суваг дахь бүх мессежийг хуулж авах
+    messages = []
+    async for msg in channel.history(limit=500, oldest_first=True):
+        if not msg.author.bot:
+            timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            messages.append(f"[{timestamp}] {msg.author.name}: {msg.content}")
+    
+    log_text = "\n".join(messages) if messages else "Ямар нэгэн мессеж бичигдээгүй байна."
+    
+    # Лог суваг руу илгээх
+    if log_channel:
+        embed = discord.Embed(
+            title=f"📋 Билет Хаагдлаа: {channel.name}",
+            description=f"**Хаасан хэрэглэгч:** {closed_by.mention}\n**Сувгийн нэр:** {channel.name}",
+            color=discord.Color.blue()
+        )
+        
+        # Мессеж богино бол шууд Embed дотор, урт бол .txt файл болгож илгээнэ
+        if len(log_text) < 1900:
+            embed.add_field(name="Мессежийн түүх:", value=f"```text\n{log_text}\n```", inline=False)
+            await log_channel.send(embed=embed)
+        else:
+            with open("transcript.txt", "w", encoding="utf-8") as f:
+                f.write(log_text)
+            await log_channel.send(embed=embed, file=discord.File("transcript.txt"))
+            os.remove("transcript.txt")
+
+    await channel.send("🔒 Билет болон мессежийн түүхийг хадгаллаа. 5 секундын дараа суваг устгагдана...")
+    await asyncio.sleep(5)
+    await channel.delete()
+
+
+# --- TICKET ХААХ ТОВЧ (VIEW) ---
+class CloseTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒")
+    async def close_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Түүхийг хадгалж байна...", ephemeral=True)
+        await close_and_log_ticket(interaction.channel, interaction.user)
+
+
+# --- ҮНДСЭН ПАНЕЛЬ СОНГОЛТ (VIEW) ---
 class TicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
 
-  def __init__(self):
-    super().__init__(timeout=None)
-
-  @discord.ui.select(
-      placeholder="Сонголт хийх...",
-      options=[
-          discord.SelectOption(
-              label="Support Ticket", description="Тусламж авах"
-          ),
-          discord.SelectOption(label="Clan Join", description="Кландах орох"),
-      ],
-  )
-  async def select_callback(
-      self, interaction: discord.Interaction, select: discord.ui.Select
-  ):
-    await interaction.response.send_message(
-        f"Таны сонголт: {select.values[0]}", ephemeral=True
+    @discord.ui.select(
+        placeholder="Сонголт хийх...",
+        options=[
+            discord.SelectOption(label="Support Ticket", description="Тусламж авах"),
+            discord.SelectOption(label="Clan Join", description="Кландах орох"),
+        ],
     )
+    async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
+        guild = interaction.guild
+        user = interaction.user
+        
+        channel_name = f"ticket-{select.values[0].lower().replace(' ', '-')}-{user.name}"
+        
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        
+        ticket_channel = await guild.create_text_channel(name=channel_name, overwrites=overwrites)
+        
+        embed = discord.Embed(
+            title=f"❖ Ticket: {select.values[0]}",
+            description=f"Сайн байна уу {user.mention}? Та **{select.values[0]}** төрлөөр билет нээлээ. Энд асуудлаа дэлгэрэнгүй бичиж үлдээнэ үү.",
+            color=discord.Color.red()
+        )
+        
+        await ticket_channel.send(embed=embed, view=CloseTicketView())
+        await interaction.response.send_message(f"Таны билет амжилттай нээгдлээ: {ticket_channel.mention}", ephemeral=True)
 
 
 @bot.event
 async def on_ready():
-  print(f"Bot {bot.user.name} амжилттай холбогдлоо!")
+    print(f"Bot {bot.user.name} амжилттай холбогдон ажиллаж байна!")
 
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def sendpanel(ctx):
-  channel = bot.get_channel(PANEL_CHANNEL_ID)
-  if channel:
-    view = TicketView()
-    embed = discord.Embed(
-        title="ELITE Support Center",
-        description="Доорх цэснээс сонголт хийж билет нээнэ үү.",
-        color=discord.Color.gold(),
-    )
-    await channel.send(embed=embed, view=view)
-    await ctx.send("Панель амжилттай байршлаа!", ephemeral=True)
-  else:
-    await ctx.send("Суваг олдсонгүй! ID-гаа шалгана уу.", ephemeral=True)
+    channel = bot.get_channel(PANEL_CHANNEL_ID)
+    if channel:
+        view = TicketView()
+        embed = discord.Embed(
+            title="ELITE Support Center",
+            description="Доорх цэснээс сонголт хийж билет нээнэ үү.",
+            color=discord.Color.gold(),
+        )
+        await channel.send(embed=embed, view=view)
+        await ctx.send("Панель амжилттай байршлаа!", ephemeral=True)
+    else:
+        await ctx.send("Суваг олдсонгүй! ID-гаа шалгана уу.", ephemeral=True)
 
 
-# --- БОТЫГ АСААХ ХЭСЭГ ---
+@bot.command()
+async def close(ctx):
+    if "ticket-" in ctx.channel.name:
+        await ctx.send("Түүхийг хадгалж байна...")
+        await close_and_log_ticket(ctx.channel, ctx.author)
+    else:
+        await ctx.send("Энэ командыг зөвхөн билетний суваг дотор ашиглах боломжтой!", ephemeral=True)
+
+
 if __name__ == "__main__":
-  TOKEN = os.getenv("DISCORD_TOKEN")
-  bot.run(TOKEN)
+    TOKEN = os.getenv("DISCORD_TOKEN")
+    bot.run(TOKEN)
